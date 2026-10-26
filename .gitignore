@@ -1,0 +1,31 @@
+# Environment variables and sensitive secrets
+config.env
+.env
+*.env
+!config.env.example
+!deployment-outputs.env.example
+
+# Deployment output files
+deployment-outputs.json
+deployment-outputs.env
+
+# Packaging and archives
+*.zip
+lambda_payload.zip
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+ENV/
+
+# Downloaded test artifacts
+downloaded_tickets/
+tickets/
+
+# Operating System files
+.DS_Store
+Thumbs.db
