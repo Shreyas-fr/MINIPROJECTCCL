@@ -155,8 +155,13 @@ ACCOUNT_ID=$(echo "$CALLER_IDENTITY" | jq -r '.Account')
 CALLER_ARN=$(echo "$CALLER_IDENTITY" | jq -r '.Arn')
 log_success "Authenticated as: ${CALLER_ARN} (Account ID: ${ACCOUNT_ID}, Region: ${AWS_REGION})"
 
-# Check regional Availability Zones (at least 2 required)
-AVAILABLE_AZS=($(aws ec2 describe-availability-zones --region "$AWS_REGION" --filters "Name=state,Values=available" --query "AvailabilityZones[].ZoneName" --output text))
+# Check regional Availability Zones (at least 2 required, filter to standard availability zones)
+AVAILABLE_AZS=($(aws ec2 describe-availability-zones --region "$AWS_REGION" --filters "Name=state,Values=available" "Name=zone-type,Values=availability-zone" --query "AvailabilityZones[].ZoneName" --output text 2>/dev/null || true))
+if [ "${#AVAILABLE_AZS[@]}" -lt 2 ]; then
+    # Fallback without zone-type filter if region metadata differs
+    AVAILABLE_AZS=($(aws ec2 describe-availability-zones --region "$AWS_REGION" --filters "Name=state,Values=available" --query "AvailabilityZones[].ZoneName" --output text))
+fi
+
 if [ "${#AVAILABLE_AZS[@]}" -lt 2 ]; then
     log_error "Region ${AWS_REGION} must have at least 2 available AZs. Found: ${AVAILABLE_AZS[*]}"
     exit 1
@@ -496,9 +501,10 @@ if [[ "$ENABLE_SQS" == "true" ]]; then
             SQS_QUEUE_ARN="arn:aws:sqs:${AWS_REGION}:${ACCOUNT_ID}:${SQS_QUEUE_NAME}"
         else
             log_info "Creating Main Ticket Buffer Queue: ${SQS_QUEUE_NAME}..."
-            REDRIVE_POLICY="{\"deadLetterTargetArn\":\"${SQS_DLQ_ARN}\",\"maxReceiveCount\":\"${SQS_MAX_RECEIVE_COUNT}\"}"
+            REDRIVE_JSON=$(jq -n --arg arn "$SQS_DLQ_ARN" --arg mrc "$SQS_MAX_RECEIVE_COUNT" '{deadLetterTargetArn: $arn, maxReceiveCount: $mrc | tonumber}')
+            SQS_ATTRS_JSON=$(jq -n --arg vt "$SQS_VISIBILITY_TIMEOUT" --arg rp "$REDRIVE_JSON" '{VisibilityTimeout: $vt, RedrivePolicy: $rp}')
             SQS_QUEUE_URL=$(aws sqs create-queue --queue-name "$SQS_QUEUE_NAME" \
-                --attributes "{\"VisibilityTimeout\":\"${SQS_VISIBILITY_TIMEOUT}\",\"RedrivePolicy\":$(echo "$REDRIVE_POLICY" | jq -R .)}" \
+                --attributes "$SQS_ATTRS_JSON" \
                 --tags "Project=SurgeGate,Environment=${ENVIRONMENT}" \
                 --query "QueueUrl" --output text)
             SQS_QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url "$SQS_QUEUE_URL" --attribute-names QueueArn --query "Attributes.QueueArn" --output text)
@@ -696,20 +702,32 @@ if [[ "$ENABLE_LAMBDA" == "true" ]]; then
             LAMBDA_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${LAMBDA_FUNCTION_NAME}"
         else
             log_info "Creating Lambda function: ${LAMBDA_FUNCTION_NAME}..."
-            # Wait a few seconds for IAM role to propagate in AWS STS
             log_info "Waiting for IAM role propagation..."
-            sleep 10
-            LAMBDA_ARN=$(aws lambda create-function \
-                --function-name "$LAMBDA_FUNCTION_NAME" \
-                --runtime "$LAMBDA_RUNTIME" \
-                --role "$LAMBDA_ROLE_ARN" \
-                --handler "ticket_processor.lambda_handler" \
-                --timeout "$LAMBDA_TIMEOUT" \
-                --memory-size "$LAMBDA_MEMORY_SIZE" \
-                --zip-file "fileb://${ZIP_PATH}" \
-                --environment "Variables={S3_BUCKET_NAME=${S3_BUCKET},SNS_TOPIC_ARN=${SNS_TOPIC_ARN:-},ENVIRONMENT=${ENVIRONMENT}}" \
-                --tags "Project=SurgeGate,Environment=${ENVIRONMENT}" \
-                --query "FunctionArn" --output text)
+            sleep 8
+            LAMBDA_ARN=""
+            for attempt in {1..6}; do
+                if LAMBDA_ARN=$(aws lambda create-function \
+                    --function-name "$LAMBDA_FUNCTION_NAME" \
+                    --runtime "$LAMBDA_RUNTIME" \
+                    --role "$LAMBDA_ROLE_ARN" \
+                    --handler "ticket_processor.lambda_handler" \
+                    --timeout "$LAMBDA_TIMEOUT" \
+                    --memory-size "$LAMBDA_MEMORY_SIZE" \
+                    --zip-file "fileb://${ZIP_PATH}" \
+                    --environment "Variables={S3_BUCKET_NAME=${S3_BUCKET},SNS_TOPIC_ARN=${SNS_TOPIC_ARN:-},ENVIRONMENT=${ENVIRONMENT}}" \
+                    --tags "Project=SurgeGate,Environment=${ENVIRONMENT}" \
+                    --query "FunctionArn" --output text 2>/dev/null); then
+                    break
+                else
+                    log_warn "IAM role not yet propagated in STS (attempt ${attempt}/6). Retrying in 5s..."
+                    sleep 5
+                fi
+            done
+
+            if [[ -z "$LAMBDA_ARN" || "$LAMBDA_ARN" == "None" ]]; then
+                log_error "Failed to create Lambda function after 6 IAM propagation attempts."
+                exit 1
+            fi
             log_success "Created Lambda function: ${LAMBDA_ARN}"
         fi
     fi
@@ -1006,11 +1024,24 @@ EOF
 }
 EOF
 )
-            LAUNCH_TEMPLATE_ID=$(aws ec2 create-launch-template \
-                --launch-template-name "$LT_NAME" \
-                --launch-template-data "$LT_DATA" \
-                --tag-specifications "ResourceType=launch-template,Tags=[{Key=Name,Value=${LT_NAME}},${TAG_SPEC}]" \
-                --query "LaunchTemplate.LaunchTemplateId" --output text)
+            LAUNCH_TEMPLATE_ID=""
+            for attempt in {1..5}; do
+                if LAUNCH_TEMPLATE_ID=$(aws ec2 create-launch-template \
+                    --launch-template-name "$LT_NAME" \
+                    --launch-template-data "$LT_DATA" \
+                    --tag-specifications "ResourceType=launch-template,Tags=[{Key=Name,Value=${LT_NAME}},${TAG_SPEC}]" \
+                    --query "LaunchTemplate.LaunchTemplateId" --output text 2>/dev/null); then
+                    break
+                else
+                    log_warn "IAM Instance profile not yet visible in EC2 (attempt ${attempt}/5). Retrying in 4s..."
+                    sleep 4
+                fi
+            done
+
+            if [[ -z "$LAUNCH_TEMPLATE_ID" || "$LAUNCH_TEMPLATE_ID" == "None" ]]; then
+                log_error "Failed to create Launch Template after multiple attempts."
+                exit 1
+            fi
             log_success "Created Launch Template: ${LAUNCH_TEMPLATE_ID}"
         fi
     fi
@@ -1144,7 +1175,7 @@ if [[ "$DRY_RUN" == "false" ]]; then
   "ec2_instance_profile": "${EC2_PROFILE_NAME}",
   "lambda_role_arn": "${LAMBDA_ROLE_ARN}",
   "lambda_function_arn": "${LAMBDA_ARN}",
-  "db_instance_identifier": "surgegate-db",
+  "db_instance_identifier": "$([ "$ENABLE_RDS" = "true" ] && echo "surgegate-db" || echo "")",
   "db_endpoint": "${DB_ENDPOINT}",
   "db_port": 3306,
   "db_name": "${DB_NAME}",

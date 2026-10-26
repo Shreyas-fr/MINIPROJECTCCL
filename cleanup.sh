@@ -302,15 +302,20 @@ done
 for sg_name in "${SGS[@]}"; do
     SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=${sg_name}" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || true)
     if [[ -n "$SG_ID" && "$SG_ID" != "None" ]]; then
-        # Wait slightly if dependencies are releasing
-        for attempt in 1 2 3; do
+        # Wait for ALB and EC2 ENIs to detach and release security group
+        SG_DELETED=false
+        for attempt in {1..8}; do
             if aws ec2 delete-security-group --group-id "$SG_ID" 2>/dev/null; then
                 log_success "Deleted Security Group: ${sg_name} (${SG_ID})"
+                SG_DELETED=true
                 break
             else
                 sleep 5
             fi
         done
+        if [[ "$SG_DELETED" == "false" ]]; then
+            log_warn "Security Group ${sg_name} (${SG_ID}) could not be deleted immediately (pending AWS ENI detach)."
+        fi
     fi
 done
 
@@ -323,11 +328,17 @@ if [[ -z "$VPC_ID" ]]; then
 fi
 
 if [[ -n "$VPC_ID" && "$VPC_ID" != "None" ]]; then
-    # Subnets
+    # Subnets (retry if interfaces are detaching)
     SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${VPC_ID}" --query "Subnets[].SubnetId" --output text 2>/dev/null || true)
     for sub in $SUBNETS; do
-        aws ec2 delete-subnet --subnet-id "$sub" 2>/dev/null || true
-        log_success "Deleted Subnet: ${sub}"
+        for attempt in {1..6}; do
+            if aws ec2 delete-subnet --subnet-id "$sub" 2>/dev/null; then
+                log_success "Deleted Subnet: ${sub}"
+                break
+            else
+                sleep 4
+            fi
+        done
     done
 
     # Route Tables (custom only)
