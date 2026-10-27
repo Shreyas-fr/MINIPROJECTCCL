@@ -296,6 +296,10 @@ class BookingService:
         db.commit()
         db.refresh(booking)
 
+        # Dispatch async ticket generation job (Local / SQS)
+        from app.services.ticket_processor import TicketProcessorService
+        TicketProcessorService.dispatch_ticket_job(db, booking, seat, user)
+
         return PaymentResponse(
             payment_id=payment.payment_id,
             transaction_ref=payment.transaction_ref,
