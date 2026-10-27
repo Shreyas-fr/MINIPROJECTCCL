@@ -9,6 +9,8 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.events import router as events_router
 from app.api.v1.queue import router as queue_router
 from app.api.v1.admin import router as admin_router
+from app.api.v1.seats import router as seats_router
+from app.api.v1.bookings import router as bookings_router
 
 app = FastAPI(
     title="SurgeGate API",
@@ -46,6 +48,8 @@ app.include_router(auth_router, prefix=f"{settings.API_V1_PREFIX}/auth", tags=["
 app.include_router(events_router, prefix=f"{settings.API_V1_PREFIX}/events", tags=["Events"])
 app.include_router(queue_router, prefix=f"{settings.API_V1_PREFIX}/queue", tags=["Queue"])
 app.include_router(admin_router, prefix=f"{settings.API_V1_PREFIX}/admin", tags=["Admin"])
+app.include_router(seats_router, prefix=f"{settings.API_V1_PREFIX}/seats", tags=["Seats"])
+app.include_router(bookings_router, prefix=f"{settings.API_V1_PREFIX}/bookings", tags=["Bookings"])
 
 # Ensure local storage directory exists for mock/local ticket assets
 os.makedirs(settings.LOCAL_STORAGE_DIR, exist_ok=True)
