@@ -29,3 +29,11 @@ tickets/
 # Operating System files
 .DS_Store
 Thumbs.db
+
+# Frontend build & dependencies
+node_modules/
+dist/
+.vite/
+
+# Local static storage
+storage/
