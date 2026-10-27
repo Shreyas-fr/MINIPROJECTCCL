@@ -242,11 +242,16 @@ class QueueService:
         ).update({"status": "EXPIRED", "admission_token": None}, synchronize_session=False)
 
         # 2. Select next waiting users with active heartbeat
-        candidates = db.query(QueueEntry).filter(
+        query = db.query(QueueEntry).filter(
             QueueEntry.event_id == event_id,
             QueueEntry.status == "WAITING",
             QueueEntry.last_heartbeat >= heartbeat_cutoff
-        ).order_by(QueueEntry.queue_number.asc()).limit(size).all()
+        ).order_by(QueueEntry.queue_number.asc()).limit(size)
+
+        if db.bind and hasattr(db.bind, "dialect") and db.bind.dialect.name == "mysql":
+            query = query.with_for_update(skip_locked=True)
+
+        candidates = query.all()
 
         admitted_count = 0
         ttl_minutes = settings.QUEUE_TOKEN_TTL_MINUTES

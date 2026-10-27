@@ -36,9 +36,43 @@ if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
 fi
 
+# Check for jq or python fallback
+if ! command -v jq >/dev/null 2>&1; then
+    PYTHON_BIN=""
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="python"
+    fi
+    if [[ -n "$PYTHON_BIN" ]]; then
+        jq() {
+            "$PYTHON_BIN" -c "
+import sys, json
+args = sys.argv[1:]
+query = ''
+inp_file = None
+for a in args:
+    if a.startswith('.'):
+        query = a
+    elif not a.startswith('-'):
+        inp_file = a
+
+try:
+    data = json.load(open(inp_file)) if inp_file else json.load(sys.stdin)
+except:
+    data = {}
+
+clean_key = query.strip('.').split('//')[0].strip()
+val = data.get(clean_key, '') if isinstance(data, dict) else ''
+print(val if val is not None else '')
+" "$@"
+        }
+    fi
+fi
+
 AWS_REGION="${AWS_REGION:-ap-south-1}"
 if [[ -f "$OUTPUTS_JSON" ]]; then
-    AWS_REGION=$(jq -r '.region // "'"$AWS_REGION"'"' "$OUTPUTS_JSON")
+    AWS_REGION=$(jq -r '.region // "'"$AWS_REGION"'"' "$OUTPUTS_JSON" 2>/dev/null || echo "$AWS_REGION")
 fi
 export AWS_DEFAULT_REGION="$AWS_REGION"
 
@@ -47,8 +81,8 @@ CALLER_IDENTITY=$(aws sts get-caller-identity --output json 2>&1) || {
     log_error "AWS authentication failed. Cannot proceed with cleanup."
     exit 1
 }
-ACCOUNT_ID=$(echo "$CALLER_IDENTITY" | jq -r '.Account')
-CALLER_ARN=$(echo "$CALLER_IDENTITY" | jq -r '.Arn')
+ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text 2>/dev/null || echo "$CALLER_IDENTITY" | jq -r '.Account')
+CALLER_ARN=$(aws sts get-caller-identity --query "Arn" --output text 2>/dev/null || echo "$CALLER_IDENTITY" | jq -r '.Arn')
 
 echo -e "${YELLOW}${BOLD}Target Environment for Deletion:${NC}"
 echo -e " • AWS Account:  ${CYAN}${ACCOUNT_ID}${NC}"
@@ -275,7 +309,7 @@ if aws iam get-role --role-name "surgegate-ec2-role" >/dev/null 2>&1; then
 fi
 
 # Lambda Role
-if aws iam get-role --role-name "surgegate-lambda-role" >/dev/null 2>&1; then
+    if aws iam get-role --role-name "surgegate-lambda-role" >/dev/null 2>&1; then
     aws iam delete-role-policy --role-name "surgegate-lambda-role" --policy-name "SurgeGateLambdaWorkerPolicy" 2>/dev/null || true
     aws iam detach-role-policy --role-name "surgegate-lambda-role" --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" 2>/dev/null || true
     aws iam delete-role --role-name "surgegate-lambda-role" || true
@@ -283,9 +317,24 @@ if aws iam get-role --role-name "surgegate-lambda-role" >/dev/null 2>&1; then
 fi
 
 # ------------------------------------------------------------------------------
-# 10. Security Groups
+# 10. AWS Systems Manager Parameter Store Parameters
 # ------------------------------------------------------------------------------
-log_step "10. Deleting Security Groups"
+log_step "10. Deleting AWS Systems Manager Parameter Store Parameters"
+ENV_NAME="${ENVIRONMENT:-dev}"
+SSM_PARAMS=($(aws ssm get-parameters-by-path --path "/surgegate/${ENV_NAME}" --query "Parameters[].Name" --output text 2>/dev/null || true))
+if [ "${#SSM_PARAMS[@]}" -gt 0 ]; then
+    for param in "${SSM_PARAMS[@]}"; do
+        if [[ -n "$param" && "$param" != "None" ]]; then
+            aws ssm delete-parameter --name "$param" >/dev/null 2>&1 || true
+            log_success "Deleted SSM Parameter: ${param}"
+        fi
+    done
+fi
+
+# ------------------------------------------------------------------------------
+# 11. Security Groups
+# ------------------------------------------------------------------------------
+log_step "11. Deleting Security Groups"
 # Delete rules first to avoid circular reference dependencies
 SGS=("surgegate-db-sg" "surgegate-ec2-sg" "surgegate-alb-sg" "surgegate-lambda-sg")
 for sg_name in "${SGS[@]}"; do
@@ -320,9 +369,9 @@ for sg_name in "${SGS[@]}"; do
 done
 
 # ------------------------------------------------------------------------------
-# 11. VPC Networking (Route Tables, Subnets, IGW, VPC)
+# 12. VPC Networking (Route Tables, Subnets, IGW, VPC)
 # ------------------------------------------------------------------------------
-log_step "11. Deleting VPC Subnets, Gateways, and Network Isolation"
+log_step "12. Deleting VPC Subnets, Gateways, and Network Isolation"
 if [[ -z "$VPC_ID" ]]; then
     VPC_ID=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=surgegate-vpc" --query "Vpcs[0].VpcId" --output text 2>/dev/null || true)
 fi

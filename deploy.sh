@@ -136,13 +136,26 @@ TAG_SPEC="Key=Project,Value=SurgeGate Key=Environment,Value=${ENVIRONMENT} Key=M
 # ------------------------------------------------------------------------------
 log_step "1. Validating Prerequisites and AWS CLI Environment"
 
-for tool in aws jq zip sed; do
+for tool in aws sed; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         log_error "Missing required command-line tool: '$tool'. Please install it before proceeding."
         exit 1
     fi
 done
-log_success "All required CLI tools are present (aws, jq, zip, sed)."
+
+# Check for Python or zip/jq
+PYTHON_BIN=""
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+fi
+
+if ! command -v jq >/dev/null 2>&1 && [[ -z "$PYTHON_BIN" ]]; then
+    log_error "Neither 'jq' nor 'python' was found. Please install either jq or python."
+    exit 1
+fi
+log_success "Command-line environment verified (aws, sed, $(command -v jq >/dev/null 2>&1 && echo 'jq' || echo 'python json fallback'))."
 
 log_info "Verifying AWS credentials via STS caller identity..."
 CALLER_IDENTITY=$(aws sts get-caller-identity --output json 2>&1) || {
@@ -151,8 +164,8 @@ CALLER_IDENTITY=$(aws sts get-caller-identity --output json 2>&1) || {
     exit 1
 }
 
-ACCOUNT_ID=$(echo "$CALLER_IDENTITY" | jq -r '.Account')
-CALLER_ARN=$(echo "$CALLER_IDENTITY" | jq -r '.Arn')
+ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text 2>/dev/null || echo "$CALLER_IDENTITY" | jq -r '.Account')
+CALLER_ARN=$(aws sts get-caller-identity --query "Arn" --output text 2>/dev/null || echo "$CALLER_IDENTITY" | jq -r '.Arn')
 log_success "Authenticated as: ${CALLER_ARN} (Account ID: ${ACCOUNT_ID}, Region: ${AWS_REGION})"
 
 # Check regional Availability Zones (at least 2 required, filter to standard availability zones)
@@ -178,12 +191,23 @@ if [[ "$ENABLE_RDS" == "true" ]]; then
         if [[ "$DRY_RUN" == "true" ]]; then
             DB_PASSWORD="[DRY-RUN-MASKED-PASSWORD]"
         else
-            echo ""
-            log_warn "DB_PASSWORD is empty in config.env."
-            echo -n "Enter a secure master password for Amazon RDS MySQL (min 8 chars, alphanumeric): "
-            read -r -s DB_PASSWORD
-            echo ""
-            if [[ ${#DB_PASSWORD} -lt 8 ]]; then
+            if [[ -t 0 ]]; then
+                echo ""
+                log_warn "DB_PASSWORD is empty in config.env."
+                echo -n "Enter a secure master password for Amazon RDS MySQL (or press Enter to auto-generate): "
+                read -r -s DB_PASSWORD || DB_PASSWORD=""
+                echo ""
+            fi
+            if [[ -z "$DB_PASSWORD" ]]; then
+                if [[ -n "$PYTHON_BIN" ]]; then
+                    DB_PASSWORD=$("$PYTHON_BIN" -c "import secrets, string; alphabet = string.ascii_letters + string.digits; print(''.join(secrets.choice(alphabet) for _ in range(16)))")
+                elif command -v openssl >/dev/null 2>&1; then
+                    DB_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
+                else
+                    DB_PASSWORD="SurgeGatePass$(date +%s)"
+                fi
+                log_info "Auto-generated secure master password for Amazon RDS."
+            elif [[ ${#DB_PASSWORD} -lt 8 ]]; then
                 log_error "Password must be at least 8 characters long."
                 exit 1
             fi
@@ -204,7 +228,7 @@ echo -e " AWS Region:           ${CYAN}${AWS_REGION}${NC}"
 echo -e " Account ID:           ${CYAN}${ACCOUNT_ID}${NC}"
 echo -e " VPC CIDR:             ${CYAN}${VPC_CIDR}${NC}"
 echo -e " Availability Zones:   ${CYAN}${AZ_A}, ${AZ_B}${NC}"
-echo -e " Enable NAT Gateway:   ${CYAN}${ENABLE_NAT_GATEWAY}${NC} (False saves ~$32/month)"
+echo -e " Enable NAT Gateway:   ${CYAN}${ENABLE_NAT_GATEWAY}${NC} (False saves ~\$32/month)"
 echo -e " Enable RDS MySQL:     ${CYAN}${ENABLE_RDS}${NC} (${DB_INSTANCE_CLASS}, 20GB gp3)"
 echo -e " Enable SQS & DLQ:     ${CYAN}${ENABLE_SQS}${NC}"
 echo -e " Enable Lambda Worker: ${CYAN}${ENABLE_LAMBDA}${NC} (${LAMBDA_RUNTIME})"
@@ -501,8 +525,8 @@ if [[ "$ENABLE_SQS" == "true" ]]; then
             SQS_QUEUE_ARN="arn:aws:sqs:${AWS_REGION}:${ACCOUNT_ID}:${SQS_QUEUE_NAME}"
         else
             log_info "Creating Main Ticket Buffer Queue: ${SQS_QUEUE_NAME}..."
-            REDRIVE_JSON=$(jq -n --arg arn "$SQS_DLQ_ARN" --arg mrc "$SQS_MAX_RECEIVE_COUNT" '{deadLetterTargetArn: $arn, maxReceiveCount: $mrc | tonumber}')
-            SQS_ATTRS_JSON=$(jq -n --arg vt "$SQS_VISIBILITY_TIMEOUT" --arg rp "$REDRIVE_JSON" '{VisibilityTimeout: $vt, RedrivePolicy: $rp}')
+            REDRIVE_JSON="{\"deadLetterTargetArn\":\"${SQS_DLQ_ARN}\",\"maxReceiveCount\":${SQS_MAX_RECEIVE_COUNT}}"
+            SQS_ATTRS_JSON="{\"VisibilityTimeout\":\"${SQS_VISIBILITY_TIMEOUT}\",\"RedrivePolicy\":\"$(echo "$REDRIVE_JSON" | sed 's/"/\\"/g')\"}"
             SQS_QUEUE_URL=$(aws sqs create-queue --queue-name "$SQS_QUEUE_NAME" \
                 --attributes "$SQS_ATTRS_JSON" \
                 --tags "Project=SurgeGate,Environment=${ENVIRONMENT}" \
@@ -558,7 +582,7 @@ else
         aws iam attach-role-policy --role-name "$EC2_ROLE_NAME" \
             --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 
-        # Attach App specific least privilege policy (SQS send, S3 read/write)
+        # Attach App specific least privilege policy (SQS send, S3 read/write, SSM parameter read)
         EC2_APP_POLICY=$(cat <<EOF
 {
     "Version": "2012-10-17",
@@ -579,6 +603,15 @@ else
                 "s3:GetObject"
             ],
             "Resource": "arn:aws:s3:::${S3_BUCKET}/*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters",
+                "ssm:GetParametersByPath"
+            ],
+            "Resource": "arn:aws:ssm:${AWS_REGION}:${ACCOUNT_ID}:parameter/surgegate/*"
         }
     ]
 }
@@ -683,7 +716,14 @@ if [[ "$ENABLE_LAMBDA" == "true" ]]; then
     fi
 
     log_info "Packaging Lambda code into ${ZIP_PATH}..."
-    (cd "$LAMBDA_DIR" && zip -q -r "$ZIP_PATH" ticket_processor.py)
+    if command -v zip >/dev/null 2>&1; then
+        (cd "$LAMBDA_DIR" && zip -q -r "$ZIP_PATH" ticket_processor.py)
+    elif [[ -n "$PYTHON_BIN" ]]; then
+        (cd "$LAMBDA_DIR" && "$PYTHON_BIN" -m zipfile -c "$ZIP_PATH" ticket_processor.py)
+    else
+        log_error "Neither 'zip' nor 'python' was found to archive Lambda code."
+        exit 1
+    fi
 
     EXISTING_LAMBDA=$(aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" --query "Configuration.FunctionArn" --output text 2>/dev/null || true)
     if [[ -n "$EXISTING_LAMBDA" && "$EXISTING_LAMBDA" != "None" ]]; then
@@ -1143,9 +1183,58 @@ if [[ "$ENABLE_CLOUDWATCH_ALARMS" == "true" && "$DRY_RUN" == "false" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 15. Save Deployment Outputs
+# 15. AWS Systems Manager Parameter Store Configuration
 # ------------------------------------------------------------------------------
-log_step "13. Saving Deployment Outputs"
+log_step "13. AWS Systems Manager Parameter Store Configuration"
+SSM_PREFIX="/surgegate/${ENVIRONMENT}"
+if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY-RUN] Would store infrastructure outputs and secrets in SSM Parameter Store under ${SSM_PREFIX}/*"
+else
+    log_info "Storing infrastructure outputs and secrets in SSM Parameter Store..."
+    put_ssm_param() {
+        local param_key="$1"
+        local param_val="$2"
+        local param_type="${3:-String}"
+        if [[ -n "$param_val" && "$param_val" != "None" ]]; then
+            aws ssm put-parameter \
+                --name "${SSM_PREFIX}/${param_key}" \
+                --value "$param_val" \
+                --type "$param_type" \
+                --overwrite \
+                --tags "Key=Project,Value=SurgeGate" "Key=Environment,Value=${ENVIRONMENT}" >/dev/null 2>&1 || true
+        fi
+    }
+
+    put_ssm_param "vpc_id" "$VPC_ID"
+    put_ssm_param "public_subnet_1" "$PUB_SUB_A_ID"
+    put_ssm_param "public_subnet_2" "$PUB_SUB_B_ID"
+    put_ssm_param "private_subnet_1" "$PRIV_SUB_A_ID"
+    put_ssm_param "private_subnet_2" "$PRIV_SUB_B_ID"
+    put_ssm_param "alb_arn" "$ALB_ARN"
+    put_ssm_param "alb_dns_name" "$ALB_DNS_NAME"
+    put_ssm_param "alb_endpoint" "http://${ALB_DNS_NAME}"
+    put_ssm_param "target_group_arn" "$TARGET_GROUP_ARN"
+    put_ssm_param "ec2_security_group" "$EC2_SG_ID"
+    put_ssm_param "rds_security_group" "$RDS_SG_ID"
+    put_ssm_param "db_host" "$DB_ENDPOINT"
+    put_ssm_param "db_port" "3306"
+    put_ssm_param "db_name" "$DB_NAME"
+    put_ssm_param "db_user" "$DB_USERNAME"
+    if [[ -n "${DB_PASSWORD:-}" && "$DB_PASSWORD" != "[DRY-RUN-MASKED-PASSWORD]" ]]; then
+        put_ssm_param "db_password" "$DB_PASSWORD" "SecureString"
+    fi
+    put_ssm_param "s3_bucket" "$S3_BUCKET"
+    put_ssm_param "sqs_url" "$SQS_QUEUE_URL"
+    put_ssm_param "sqs_dlq_url" "$SQS_DLQ_URL"
+    put_ssm_param "lambda_arn" "$LAMBDA_ARN"
+    put_ssm_param "asg_name" "$ASG_NAME"
+    log_success "Stored all infrastructure parameters securely in SSM Parameter Store under ${SSM_PREFIX}/*"
+fi
+
+# ------------------------------------------------------------------------------
+# 16. Save Deployment Outputs
+# ------------------------------------------------------------------------------
+log_step "14. Saving Deployment Outputs"
 
 if [[ "$DRY_RUN" == "false" ]]; then
     cat <<EOF > "$OUTPUTS_JSON"

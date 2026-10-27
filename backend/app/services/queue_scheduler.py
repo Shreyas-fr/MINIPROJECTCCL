@@ -20,8 +20,23 @@ class QueueAdmissionScheduler:
         """
         Executes one admission cycle across all ACTIVE events with available capacity.
         Preserves strict FIFO ordering and production queue controls.
+        Uses MySQL distributed lock to guarantee that when ASG scales beyond 1 instance,
+        only one instance executes the admission cycle at any given second.
         Returns the total number of admitted users.
         """
+        is_mysql = (db.bind.dialect.name == "mysql") if (db.bind and hasattr(db.bind, "dialect")) else False
+        lock_acquired = False
+        if is_mysql:
+            from sqlalchemy import text
+            try:
+                res = db.execute(text("SELECT GET_LOCK('surgegate_queue_scheduler_lock', 0)")).scalar()
+                if res != 1:
+                    logger.debug("[QueueAdmissionScheduler] Another ASG instance holds scheduler lock. Skipping cycle.")
+                    return 0
+                lock_acquired = True
+            except Exception as ex:
+                logger.warning(f"[QueueAdmissionScheduler] Advisory lock check failed: {ex}")
+
         try:
             active_events = db.query(Event).filter(
                 Event.status == "ACTIVE",
@@ -52,6 +67,13 @@ class QueueAdmissionScheduler:
         except Exception as e:
             logger.error(f"[QueueAdmissionScheduler] Error in admission cycle: {e}", exc_info=True)
             return 0
+        finally:
+            if is_mysql and lock_acquired:
+                from sqlalchemy import text
+                try:
+                    db.execute(text("SELECT RELEASE_LOCK('surgegate_queue_scheduler_lock')"))
+                except Exception:
+                    pass
 
     @classmethod
     def _cycle_wrapper(cls) -> int:

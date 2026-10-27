@@ -1,0 +1,45 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: surgegate-backend-prod
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=${SURGEGATE_DB_HOST}
+      - DB_PORT=${SURGEGATE_DB_PORT:-3306}
+      - DB_NAME=${SURGEGATE_DB_NAME:-surgegate}
+      - DB_USER=${SURGEGATE_DB_USER:-surgegate_admin}
+      - DB_PASSWORD=${SURGEGATE_DB_PASSWORD}
+      - DATABASE_URL=mysql+pymysql://${SURGEGATE_DB_USER:-surgegate_admin}:${SURGEGATE_DB_PASSWORD}@${SURGEGATE_DB_HOST}:${SURGEGATE_DB_PORT:-3306}/${SURGEGATE_DB_NAME:-surgegate}?charset=utf8mb4
+      - APP_PORT=8000
+      - ENVIRONMENT=${ENVIRONMENT:-dev}
+      - USE_AWS_MOCK=false
+      - AWS_REGION=${AWS_REGION:-ap-south-1}
+      - SURGEGATE_SQS_URL=${SURGEGATE_SQS_URL}
+      - SURGEGATE_S3_BUCKET=${SURGEGATE_S3_BUCKET}
+      - ENABLE_QUEUE_SCHEDULER=true
+      - QUEUE_ADMISSION_BATCH_SIZE=5
+      - QUEUE_ADMISSION_INTERVAL_SECONDS=3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: surgegate-frontend-prod
+    restart: always
+    ports:
+      - "3000:5173"
+    environment:
+      - VITE_BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy

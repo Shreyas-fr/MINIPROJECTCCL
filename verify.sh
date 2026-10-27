@@ -43,7 +43,41 @@ if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
 fi
 
-AWS_REGION=$(jq -r '.region // "ap-south-1"' "$OUTPUTS_JSON")
+# Check for jq or python fallback
+if ! command -v jq >/dev/null 2>&1; then
+    PYTHON_BIN=""
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="python"
+    fi
+    if [[ -n "$PYTHON_BIN" ]]; then
+        jq() {
+            "$PYTHON_BIN" -c "
+import sys, json
+args = sys.argv[1:]
+query = ''
+inp_file = None
+for a in args:
+    if a.startswith('.'):
+        query = a
+    elif not a.startswith('-'):
+        inp_file = a
+
+try:
+    data = json.load(open(inp_file)) if inp_file else json.load(sys.stdin)
+except:
+    data = {}
+
+clean_key = query.strip('.').split('//')[0].strip()
+val = data.get(clean_key, '') if isinstance(data, dict) else ''
+print(val if val is not None else '')
+" "$@"
+        }
+    fi
+fi
+
+AWS_REGION=$(jq -r '.region // "ap-south-1"' "$OUTPUTS_JSON" 2>/dev/null || echo "ap-south-1")
 export AWS_DEFAULT_REGION="$AWS_REGION"
 
 # Verify AWS CLI connectivity
@@ -296,7 +330,27 @@ for alarm in "${ALARMS[@]}"; do
 done
 
 # ------------------------------------------------------------------------------
-# 10. Audit Summary
+# 10. AWS Systems Manager Parameter Store Audit
+# ------------------------------------------------------------------------------
+section "10. AWS Systems Manager Parameter Store Audit"
+ENV_NAME="${ENVIRONMENT:-dev}"
+SSM_PARAMS=$(aws ssm get-parameters-by-path --path "/surgegate/${ENV_NAME}" --query "Parameters[].Name" --output text 2>/dev/null || true)
+if [[ -n "$SSM_PARAMS" && "$SSM_PARAMS" != "None" ]]; then
+    PARAM_COUNT=$(echo "$SSM_PARAMS" | wc -w)
+    print_pass "Found ${PARAM_COUNT} parameters stored under /surgegate/${ENV_NAME}/ in SSM Parameter Store."
+    # Verify secure string for db_password
+    DB_PASS_TYPE=$(aws ssm describe-parameters --filters "Key=Name,Values=/surgegate/${ENV_NAME}/db_password" --query "Parameters[0].Type" --output text 2>/dev/null || true)
+    if [[ "$DB_PASS_TYPE" == "SecureString" ]]; then
+        print_pass "Database password parameter (/surgegate/${ENV_NAME}/db_password) is encrypted (Type: SecureString)."
+    elif [[ -n "$DB_PASS_TYPE" && "$DB_PASS_TYPE" != "None" ]]; then
+        print_fail "SECURITY WARNING: /surgegate/${ENV_NAME}/db_password is not encrypted as SecureString (Found: ${DB_PASS_TYPE})!"
+    fi
+else
+    print_skipped "SSM Parameter Store check skipped (no parameters under /surgegate/${ENV_NAME}/)."
+fi
+
+# ------------------------------------------------------------------------------
+# 11. Audit Summary
 # ------------------------------------------------------------------------------
 echo ""
 echo -e "${BOLD}${CYAN}==============================================================================${NC}"
