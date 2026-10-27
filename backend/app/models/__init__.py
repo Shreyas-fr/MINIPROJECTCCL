@@ -1,6 +1,6 @@
 from datetime import datetime
 import uuid
-from sqlalchemy import Column, String, Integer, DateTime, Text, Enum, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import Column, String, Integer, DateTime, Text, Enum, ForeignKey, UniqueConstraint, Index, CheckConstraint
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -37,6 +37,10 @@ class Event(Base):
     bookings = relationship("Booking", back_populates="event")
     queue_entries = relationship("QueueEntry", back_populates="event")
 
+    __table_args__ = (
+        CheckConstraint("available_capacity >= 0", name="chk_capacity"),
+    )
+
 
 class Seat(Base):
     __tablename__ = "seats"
@@ -44,7 +48,7 @@ class Seat(Base):
     seat_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     event_id = Column(String(36), ForeignKey("events.event_id", ondelete="CASCADE"), nullable=False)
     section = Column(String(50), nullable=False)
-    row_number = Column(String(20), nullable=False)
+    row_number = Column("row_number", String(20), nullable=False, quote=True)
     seat_number = Column(String(20), nullable=False)
     price_cents = Column(Integer, nullable=False)
     status = Column(Enum("AVAILABLE", "RESERVED", "BOOKED", name="seat_status_enum"), default="AVAILABLE")

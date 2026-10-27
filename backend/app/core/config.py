@@ -24,8 +24,9 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
     # Virtual Waiting Room Settings
+    ENABLE_QUEUE_SCHEDULER: bool = True
     QUEUE_ADMISSION_BATCH_SIZE: int = 5
-    QUEUE_ADMISSION_INTERVAL_SECONDS: int = 5
+    QUEUE_ADMISSION_INTERVAL_SECONDS: int = 3
     QUEUE_TOKEN_TTL_MINUTES: int = 15
     QUEUE_HEARTBEAT_TIMEOUT_SECONDS: int = 45
 

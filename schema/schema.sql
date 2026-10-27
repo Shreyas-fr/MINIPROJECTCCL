@@ -7,7 +7,20 @@ CREATE DATABASE IF NOT EXISTS surgegate CHARACTER SET utf8mb4 COLLATE utf8mb4_un
 USE surgegate;
 
 -- ------------------------------------------------------------------------------
--- 1. Events Table
+-- 1. Users Table (Authentication & Role-Based Access)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+    user_id VARCHAR(36) PRIMARY KEY,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    full_name VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255) NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'CUSTOMER',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_users_email (email)
+) ENGINE=InnoDB;
+
+-- ------------------------------------------------------------------------------
+-- 2. Events Table
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS events (
     event_id VARCHAR(36) PRIMARY KEY,
@@ -24,13 +37,13 @@ CREATE TABLE IF NOT EXISTS events (
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------------------------
--- 2. Seat Tiers & Inventory
+-- 3. Seat Tiers & Inventory (Row-Level Locking with Optimistic Version Counter)
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS seats (
     seat_id VARCHAR(36) PRIMARY KEY,
     event_id VARCHAR(36) NOT NULL,
     section VARCHAR(50) NOT NULL,
-    row_number VARCHAR(20) NOT NULL,
+    `row_number` VARCHAR(20) NOT NULL,
     seat_number VARCHAR(20) NOT NULL,
     price_cents INT NOT NULL,
     -- Status progression: AVAILABLE -> RESERVED -> BOOKED
@@ -43,18 +56,8 @@ CREATE TABLE IF NOT EXISTS seats (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (event_id) REFERENCES events(event_id) ON DELETE CASCADE,
     -- STRICT CONSTRAINT: A seat can only exist once per event/section/row/seat_num
-    UNIQUE KEY uq_event_seat (event_id, section, row_number, seat_number),
+    UNIQUE KEY uq_event_seat (event_id, section, `row_number`, seat_number),
     INDEX idx_seat_status_lookup (event_id, status, reserved_until)
-) ENGINE=InnoDB;
-
--- ------------------------------------------------------------------------------
--- 3. Users Table
--- ------------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS users (
-    user_id VARCHAR(36) PRIMARY KEY,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    full_name VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------------------------
@@ -69,13 +72,17 @@ CREATE TABLE IF NOT EXISTS bookings (
     seat_id VARCHAR(36) NOT NULL,
     total_amount_cents INT NOT NULL,
     status ENUM('PENDING_PAYMENT', 'CONFIRMED', 'CANCELLED', 'EXPIRED') DEFAULT 'PENDING_PAYMENT',
+    ticket_id VARCHAR(64) NULL,
+    ticket_s3_url VARCHAR(512) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(user_id),
     FOREIGN KEY (event_id) REFERENCES events(event_id),
     FOREIGN KEY (seat_id) REFERENCES seats(seat_id),
     -- STRICT CONSTRAINT: Prevents multiple confirmed bookings for the same seat
-    UNIQUE KEY uq_active_seat_booking (seat_id, status)
+    UNIQUE KEY uq_active_seat_booking (seat_id, status),
+    INDEX idx_bookings_booking_ref (booking_ref),
+    INDEX idx_bookings_idempotency_key (idempotency_key)
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------------------------
@@ -90,13 +97,50 @@ CREATE TABLE IF NOT EXISTS payments (
     payment_status ENUM('INITIATED', 'SUCCESS', 'FAILED') DEFAULT 'INITIATED',
     payment_method VARCHAR(50) DEFAULT 'SIMULATED_CARD',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (booking_id) REFERENCES bookings(booking_id)
+    FOREIGN KEY (booking_id) REFERENCES bookings(booking_id),
+    INDEX idx_payments_transaction_ref (transaction_ref)
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------------------------
--- 6. High-Concurrency Reservation Demonstration Procedure
+-- 6. Durable Virtual Waiting Room (Queue Entries)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS queue_entries (
+    queue_id VARCHAR(36) PRIMARY KEY,
+    event_id VARCHAR(36) NOT NULL,
+    user_id VARCHAR(36) NOT NULL,
+    queue_number INT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'WAITING',
+    admission_token VARCHAR(128) NULL UNIQUE,
+    joined_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_heartbeat DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    admitted_at DATETIME NULL,
+    admission_expires_at DATETIME NULL,
+    FOREIGN KEY (event_id) REFERENCES events(event_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    INDEX idx_queue_event_status_num (event_id, status, queue_number),
+    INDEX idx_queue_entries_event_id (event_id),
+    INDEX idx_queue_entries_user_id (user_id),
+    INDEX idx_queue_entries_admission_token (admission_token)
+) ENGINE=InnoDB;
+
+-- ------------------------------------------------------------------------------
+-- 7. Alembic Migration Version Tracking
+-- Ensures compatibility with both schema.sql direct execution and Alembic migrations
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS alembic_version (
+    version_num VARCHAR(32) NOT NULL,
+    PRIMARY KEY (version_num)
+) ENGINE=InnoDB;
+
+INSERT INTO alembic_version (version_num)
+SELECT '001_initial_schema'
+WHERE NOT EXISTS (SELECT 1 FROM alembic_version WHERE version_num = '001_initial_schema');
+
+-- ------------------------------------------------------------------------------
+-- 8. High-Concurrency Reservation Demonstration Procedure
 -- Demonstrates row-level pessimistic locking (SELECT FOR UPDATE) with lock timeout
 -- ------------------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS ReserveSeatAtomic;
 DELIMITER //
 CREATE PROCEDURE ReserveSeatAtomic(
     IN p_event_id VARCHAR(36),

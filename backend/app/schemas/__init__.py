@@ -110,14 +110,16 @@ class QueueHeartbeatRequest(BaseModel):
 # Seat Reservation (5-minute hold)
 class SeatReserveRequest(BaseModel):
     event_id: str
-    seat_id: str
+    seat_id: Optional[str] = None
+    seat_ids: Optional[List[str]] = None
     admission_token: str
 
 
 class SeatReserveResponse(BaseModel):
     success: bool
     message: str
-    seat_id: str
+    seat_id: Optional[str] = None
+    seat_ids: Optional[List[str]] = None
     status: str
     reserved_until: Optional[datetime] = None
     hold_duration_seconds: int = 300
@@ -126,13 +128,15 @@ class SeatReserveResponse(BaseModel):
 # Booking & Mock Payment
 class BookingCreateRequest(BaseModel):
     event_id: str
-    seat_id: str
+    seat_id: Optional[str] = None
+    seat_ids: Optional[List[str]] = None
     idempotency_key: str
     admission_token: str
 
 
 class PaymentSimulateRequest(BaseModel):
-    booking_id: str
+    booking_id: Optional[str] = None
+    booking_ids: Optional[List[str]] = None
     idempotency_key: str
     simulate_failure: bool = False
     payment_method: str = "SIMULATED_CARD"
@@ -145,6 +149,7 @@ class PaymentResponse(BaseModel):
     amount_cents: int
     status: str
     message: str
+    booking_ids: Optional[List[str]] = None
 
 
 class BookingOut(BaseModel):
@@ -160,6 +165,16 @@ class BookingOut(BaseModel):
     ticket_s3_url: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Rich details for UI display & multi-seat checkout
+    event_name: Optional[str] = None
+    venue: Optional[str] = None
+    event_timestamp: Optional[datetime] = None
+    seat_info: Optional[str] = None
+    section: Optional[str] = None
+    row_number: Optional[str] = None
+    seat_number: Optional[str] = None
+    booking_ids: Optional[List[str]] = None
+    bookings: Optional[List['BookingOut']] = None
 
     model_config = ConfigDict(from_attributes=True)
 

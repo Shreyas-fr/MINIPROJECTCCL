@@ -34,6 +34,20 @@ def checkout(
     return BookingService.simulate_payment_checkout(db, current_user, request)
 
 
+def _enrich_booking_out(b: Booking) -> BookingOut:
+    out = BookingOut.model_validate(b)
+    if b.event:
+        out.event_name = b.event.name
+        out.venue = b.event.venue
+        out.event_timestamp = b.event.event_timestamp
+    if b.seat:
+        out.section = b.seat.section
+        out.row_number = b.seat.row_number
+        out.seat_number = b.seat.seat_number
+        out.seat_info = f"{b.seat.section} • Row {b.seat.row_number}, Seat {b.seat.seat_number}"
+    return out
+
+
 @router.get("/my", response_model=List[BookingOut])
 def get_my_bookings(
     db: Session = Depends(get_db),
@@ -42,7 +56,7 @@ def get_my_bookings(
     bookings = db.query(Booking).filter(
         Booking.user_id == current_user.user_id
     ).order_by(Booking.created_at.desc()).all()
-    return [BookingOut.model_validate(b) for b in bookings]
+    return [_enrich_booking_out(b) for b in bookings]
 
 
 @router.get("/{booking_id}", response_model=BookingOut)
@@ -61,4 +75,4 @@ def get_booking_by_id(
     if booking.user_id != current_user.user_id and current_user.role != "ADMIN":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
-    return BookingOut.model_validate(booking)
+    return _enrich_booking_out(booking)

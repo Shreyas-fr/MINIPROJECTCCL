@@ -6,8 +6,9 @@ import { api } from '../services/api';
 interface CheckoutModalProps {
   isOpen: boolean;
   event: EventDetail;
-  seat: Seat;
-  admissionToken: string;
+  seat?: Seat | null;
+  seats?: Seat[];
+  admissionToken?: string | null;
   onClose: () => void;
   onSuccess: (booking: Booking) => void;
 }
@@ -16,6 +17,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   isOpen,
   event,
   seat,
+  seats,
   admissionToken,
   onClose,
   onSuccess,
@@ -27,22 +29,40 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
   if (!isOpen) return null;
 
+  const targetSeats: Seat[] = seats && seats.length > 0 ? seats : (seat ? [seat] : []);
+  const tokenToUse = admissionToken || api.getStoredAdmissionToken(event.event_id) || '';
+  const totalPriceCents = targetSeats.reduce((sum, s) => sum + s.price_cents, 0);
+
   const handlePay = async () => {
+    if (!tokenToUse) {
+      setError('Queue admission token required. Please enter through the virtual waiting room.');
+      return;
+    }
+    if (targetSeats.length === 0) {
+      setError('No seats selected for checkout.');
+      return;
+    }
+
     setError(null);
     setLoading(true);
 
     try {
       // 1. Create Booking (Pending Payment)
+      const seatIds = targetSeats.map((s) => s.seat_id);
       const booking = await api.createBooking(
         event.event_id,
-        seat.seat_id,
+        seatIds.length === 1 ? seatIds[0] : seatIds,
         idempotencyKey,
-        admissionToken
+        tokenToUse
       );
 
       // 2. Process Simulated Checkout
+      const checkoutTarget = booking.booking_ids && booking.booking_ids.length > 0
+        ? booking.booking_ids
+        : booking.booking_id;
+
       const paymentRes = await api.checkout(
-        booking.booking_id,
+        checkoutTarget,
         `pay-${idempotencyKey}`,
         simulateFailure
       );
@@ -85,23 +105,39 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             <span className="font-bold text-white truncate max-w-[240px]">{event.name}</span>
           </div>
           <div className="flex justify-between text-slate-300">
-            <span className="text-slate-500">Seat Allocation:</span>
-            <span className="text-brand-300 font-bold">
-              {seat.section} • Row {seat.row_number}, Seat {seat.seat_number}
-            </span>
+            <span className="text-slate-500">Venue:</span>
+            <span className="text-slate-300 truncate max-w-[240px]">{event.venue}</span>
           </div>
-          <div className="flex justify-between text-slate-300">
+
+          <div className="pt-2 border-t border-slate-800/80">
+            <span className="text-slate-500 block mb-1">Seats Reserved ({targetSeats.length}):</span>
+            <div className="space-y-1">
+              {targetSeats.map((s) => (
+                <div key={s.seat_id} className="flex justify-between text-slate-300 pl-2">
+                  <span className="text-brand-300 font-semibold">
+                    {s.section} • Row {s.row_number}, Seat {s.seat_number}
+                  </span>
+                  <span className="text-emerald-400 font-semibold">
+                    ${(s.price_cents / 100).toFixed(2)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex justify-between text-slate-300 pt-1 border-t border-slate-800/60">
             <span className="text-slate-500">Admission Pass:</span>
-            <span className="text-emerald-400 truncate max-w-[200px]">{admissionToken}</span>
+            <span className="text-emerald-400 truncate max-w-[200px]">{tokenToUse || 'Session Verified'}</span>
           </div>
           <div className="flex justify-between text-slate-300">
             <span className="text-slate-500">Idempotency Key:</span>
             <span className="text-slate-400 truncate max-w-[200px]">{idempotencyKey}</span>
           </div>
-          <div className="pt-2 border-t border-slate-800 flex justify-between text-sm font-bold">
+
+          <div className="pt-3 border-t border-slate-800 flex justify-between text-sm font-bold">
             <span className="text-slate-200">Total Price:</span>
             <span className="text-emerald-400 text-base">
-              ${(seat.price_cents / 100).toFixed(2)} USD
+              ${(totalPriceCents / 100).toFixed(2)} USD
             </span>
           </div>
         </div>
@@ -112,7 +148,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             <input
               type="checkbox"
               checked={simulateFailure}
-              onChange={(e) => setSimulateFailure(e.target.checked)}
+              onChange={(e) => {
+                setSimulateFailure(e.target.checked);
+                setError(null);
+              }}
               className="mt-1 w-4 h-4 rounded text-brand-500 bg-slate-800 border-slate-700 focus:ring-0"
             />
             <div className="text-xs">
@@ -121,7 +160,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
               </span>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Enable to demonstrate graceful transaction failure: seat hold remains protected in MySQL for retry within the 5-minute window.
+                Enable to demonstrate graceful transaction failure: seat holds remain protected in MySQL for retry within the 5-minute window.
               </p>
             </div>
           </label>
@@ -142,12 +181,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           {loading ? (
             <>
               <RefreshCw className="w-4 h-4 animate-spin" />
-              <span>Verifying Idempotency & Securing Seat...</span>
+              <span>Verifying Idempotency & Securing Seats...</span>
             </>
           ) : (
             <>
               <ShieldCheck className="w-4 h-4" />
-              <span>Authorize Payment & Confirm Booking</span>
+              <span>Authorize Payment & Confirm {targetSeats.length} Seat(s)</span>
               <ArrowRight className="w-4 h-4" />
             </>
           )}

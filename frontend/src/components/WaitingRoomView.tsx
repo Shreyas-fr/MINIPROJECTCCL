@@ -40,6 +40,7 @@ export const WaitingRoomView: React.FC<WaitingRoomViewProps> = ({
         if (isMounted) {
           setQueueStatus(status);
           if (status.status === 'ADMITTED' && status.admission_token) {
+            api.setStoredAdmissionToken(event.event_id, status.admission_token);
             onAdmitted(status.admission_token);
           }
         }
@@ -62,6 +63,7 @@ export const WaitingRoomView: React.FC<WaitingRoomViewProps> = ({
           setQueueStatus(updated);
           setHeartbeatActive(true);
           if (updated.status === 'ADMITTED' && updated.admission_token) {
+            api.setStoredAdmissionToken(event.event_id, updated.admission_token);
             onAdmitted(updated.admission_token);
           }
         }

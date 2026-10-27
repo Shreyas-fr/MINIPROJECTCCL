@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta
 import uuid
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.core.database import SessionLocal, engine, Base
+from app.core.init_db import init_db
 from app.core.security import get_password_hash
 from app.models import User, Event, Seat, Booking, Payment
 
@@ -48,6 +50,11 @@ def seed_database(db: Session) -> None:
             db.flush()
             created_users[u["email"]] = new_user
         else:
+            if not existing.password_hash:
+                existing.password_hash = get_password_hash(u["password"])
+            if existing.role != u["role"]:
+                existing.role = u["role"]
+            db.flush()
             created_users[u["email"]] = existing
 
     # 2. Create Events and Realistic Seat Maps
@@ -91,17 +98,35 @@ def seed_database(db: Session) -> None:
     for spec in events_spec:
         existing_event = db.query(Event).filter(Event.name == spec["name"]).first()
         if existing_event:
-            continue
+            # Check if seats are already populated for this event
+            existing_seats_count = db.query(func.count(Seat.seat_id)).filter(Seat.event_id == existing_event.event_id).scalar() or 0
+            if existing_seats_count > 0:
+                continue
+            event_id = existing_event.event_id
+        else:
+            total_seats = sum(len(sec["rows"]) * sec["seats_per_row"] for sec in spec["sections"])
+            event_id = str(uuid.uuid4())
+            event_time = datetime.utcnow() + timedelta(days=spec["days_ahead"])
 
-        total_seats = 0
+            new_event = Event(
+                event_id=event_id,
+                name=spec["name"],
+                description=spec["description"],
+                venue=spec["venue"],
+                event_timestamp=event_time,
+                total_capacity=total_seats,
+                available_capacity=total_seats,
+                status=spec["status"],
+                created_at=datetime.utcnow()
+            )
+            db.add(new_event)
+            db.flush()
+
+        # Insert seats for this event
         seats_to_insert = []
-        event_id = str(uuid.uuid4())
-        event_time = datetime.utcnow() + timedelta(days=spec["days_ahead"])
-
         for sec in spec["sections"]:
             for row in sec["rows"]:
                 for seat_idx in range(1, sec["seats_per_row"] + 1):
-                    total_seats += 1
                     seat_num = f"{seat_idx:02d}"
                     seat = Seat(
                         seat_id=str(uuid.uuid4()),
@@ -116,28 +141,15 @@ def seed_database(db: Session) -> None:
                     )
                     seats_to_insert.append(seat)
 
-        new_event = Event(
-            event_id=event_id,
-            name=spec["name"],
-            description=spec["description"],
-            venue=spec["venue"],
-            event_timestamp=event_time,
-            total_capacity=total_seats,
-            available_capacity=total_seats,
-            status=spec["status"],
-            created_at=datetime.utcnow()
-        )
-        db.add(new_event)
-        db.flush()
-
         for s in seats_to_insert:
             db.add(s)
+        db.flush()
 
     db.commit()
     print("Database seeding completed successfully.")
 
 
 if __name__ == "__main__":
-    Base.metadata.create_all(bind=engine)
+    init_db(engine)
     with SessionLocal() as session:
         seed_database(session)

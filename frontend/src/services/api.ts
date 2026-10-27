@@ -108,7 +108,33 @@ export const api = {
     return handleResponse(res);
   },
 
+  // Token Storage Helpers (sessionStorage persistence per event)
+  getStoredAdmissionToken(eventId: string): string | null {
+    try {
+      return sessionStorage.getItem(`surgegate_admission_${eventId}`);
+    } catch {
+      return null;
+    }
+  },
+
+  setStoredAdmissionToken(eventId: string, token: string): void {
+    try {
+      sessionStorage.setItem(`surgegate_admission_${eventId}`, token);
+    } catch {
+      // Ignored
+    }
+  },
+
+  clearStoredAdmissionToken(eventId: string): void {
+    try {
+      sessionStorage.removeItem(`surgegate_admission_${eventId}`);
+    } catch {
+      // Ignored
+    }
+  },
+
   async leaveQueue(eventId: string): Promise<any> {
+    this.clearStoredAdmissionToken(eventId);
     const res = await fetch(`${API_BASE}/queue/${eventId}/leave`, {
       method: 'POST',
       headers: { ...getAuthHeader() },
@@ -116,22 +142,35 @@ export const api = {
     return handleResponse(res);
   },
 
-  // Seat Reservation
-  async holdSeat(eventId: string, seatId: string, admissionToken: string): Promise<any> {
+  // Seat Reservation (Single or Multiple Seats)
+  async holdSeat(eventId: string, seatIdOrIds: string | string[], admissionToken: string): Promise<any> {
+    const payload: Record<string, any> = {
+      event_id: eventId,
+      admission_token: admissionToken,
+    };
+    if (Array.isArray(seatIdOrIds)) {
+      payload.seat_ids = seatIdOrIds;
+    } else {
+      payload.seat_id = seatIdOrIds;
+    }
+
     const res = await fetch(`${API_BASE}/seats/hold`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-      body: JSON.stringify({
-        event_id: eventId,
-        seat_id: seatId,
-        admission_token: admissionToken,
-      }),
+      body: JSON.stringify(payload),
     });
     return handleResponse(res);
   },
 
-  async releaseSeat(eventId: string, seatId: string): Promise<any> {
-    const res = await fetch(`${API_BASE}/seats/release?event_id=${eventId}&seat_id=${seatId}`, {
+  async holdSeats(eventId: string, seatIds: string[], admissionToken: string): Promise<any> {
+    return this.holdSeat(eventId, seatIds, admissionToken);
+  },
+
+  async releaseSeat(eventId: string, seatId?: string): Promise<any> {
+    const url = seatId 
+      ? `${API_BASE}/seats/release?event_id=${eventId}&seat_id=${seatId}`
+      : `${API_BASE}/seats/release?event_id=${eventId}`;
+    const res = await fetch(url, {
       method: 'POST',
       headers: { ...getAuthHeader() },
     });
@@ -139,30 +178,51 @@ export const api = {
   },
 
   // Bookings & Mock Checkout
-  async createBooking(eventId: string, seatId: string, idempotencyKey: string, admissionToken: string): Promise<Booking> {
+  async createBooking(
+    eventId: string, 
+    seatIdOrIds: string | string[], 
+    idempotencyKey: string, 
+    admissionToken: string
+  ): Promise<Booking> {
+    const payload: Record<string, any> = {
+      event_id: eventId,
+      idempotency_key: idempotencyKey,
+      admission_token: admissionToken,
+    };
+    if (Array.isArray(seatIdOrIds)) {
+      payload.seat_ids = seatIdOrIds;
+    } else {
+      payload.seat_id = seatIdOrIds;
+    }
+
     const res = await fetch(`${API_BASE}/bookings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-      body: JSON.stringify({
-        event_id: eventId,
-        seat_id: seatId,
-        idempotency_key: idempotencyKey,
-        admission_token: admissionToken,
-      }),
+      body: JSON.stringify(payload),
     });
     return handleResponse<Booking>(res);
   },
 
-  async checkout(bookingId: string, idempotencyKey: string, simulateFailure = false): Promise<PaymentResult> {
+  async checkout(
+    bookingIdOrIds: string | string[], 
+    idempotencyKey: string, 
+    simulateFailure = false
+  ): Promise<PaymentResult> {
+    const payload: Record<string, any> = {
+      idempotency_key: idempotencyKey,
+      simulate_failure: simulateFailure,
+      payment_method: 'SIMULATED_CARD',
+    };
+    if (Array.isArray(bookingIdOrIds)) {
+      payload.booking_ids = bookingIdOrIds;
+    } else {
+      payload.booking_id = bookingIdOrIds;
+    }
+
     const res = await fetch(`${API_BASE}/bookings/checkout`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
-      body: JSON.stringify({
-        booking_id: bookingId,
-        idempotency_key: idempotencyKey,
-        simulate_failure: simulateFailure,
-        payment_method: 'SIMULATED_CARD',
-      }),
+      body: JSON.stringify(payload),
     });
     return handleResponse<PaymentResult>(res);
   },

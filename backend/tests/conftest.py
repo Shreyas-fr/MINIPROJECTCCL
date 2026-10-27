@@ -6,6 +6,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.main import app
 from app.core.database import Base, get_db
+from app.core.config import settings
+
+# Disable automatic background scheduler in unit tests
+settings.ENABLE_QUEUE_SCHEDULER = False
 
 # In-memory SQLite for testing
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"

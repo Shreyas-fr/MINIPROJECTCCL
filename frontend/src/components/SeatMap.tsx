@@ -6,7 +6,8 @@ import {
   ArrowRight, 
   Check, 
   RefreshCw, 
-  Unlock
+  Unlock,
+  Users
 } from 'lucide-react';
 import { EventDetail, Seat } from '../types';
 import { api } from '../services/api';
@@ -15,7 +16,7 @@ import { useAuth } from '../context/AuthContext';
 interface SeatMapProps {
   event: EventDetail;
   admissionToken?: string | null;
-  onProceedToCheckout: (seat: Seat) => void;
+  onProceedToCheckout: (seats: Seat[]) => void;
   onBackToQueue?: () => void;
 }
 
@@ -23,33 +24,65 @@ export const SeatMap: React.FC<SeatMapProps> = ({
   event,
   admissionToken,
   onProceedToCheckout,
+  onBackToQueue,
 }) => {
   const { user } = useAuth();
   const [seats, setSeats] = useState<Seat[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedSeat, setSelectedSeat] = useState<Seat | null>(null);
-  const [heldSeat, setHeldSeat] = useState<Seat | null>(null);
+  const [selectedSeats, setSelectedSeats] = useState<Seat[]>([]);
+  const [heldSeats, setHeldSeats] = useState<Seat[]>([]);
+  const [activeAdmissionToken, setActiveAdmissionToken] = useState<string | null>(
+    admissionToken || api.getStoredAdmissionToken(event.event_id)
+  );
   const [secondsRemaining, setSecondsRemaining] = useState<number>(0);
   const [holding, setHolding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Sync token from props or storage or backend status
+  useEffect(() => {
+    let token = admissionToken || api.getStoredAdmissionToken(event.event_id);
+    if (token) {
+      setActiveAdmissionToken(token);
+      api.setStoredAdmissionToken(event.event_id, token);
+    } else {
+      // Check if user is already admitted in backend
+      api.getQueueStatus(event.event_id)
+        .then((status) => {
+          if (status.status === 'ADMITTED' && status.admission_token) {
+            setActiveAdmissionToken(status.admission_token);
+            api.setStoredAdmissionToken(event.event_id, status.admission_token);
+          }
+        })
+        .catch(() => {
+          // User not in queue or error
+        });
+    }
+  }, [event.event_id, admissionToken]);
 
   const fetchSeats = async () => {
     try {
       const data = await api.getEventSeats(event.event_id);
       setSeats(data);
 
-      // Check if user already holds a seat
+      // Check if user currently holds seats
       if (user) {
-        const myHeld = data.find(
+        const myHelds = data.filter(
           (s) => s.status === 'RESERVED' && s.reserved_by === user.user_id
         );
-        if (myHeld) {
-          setHeldSeat(myHeld);
-          setSelectedSeat(myHeld);
-          if (myHeld.reserved_until) {
-            const diff = Math.max(0, Math.floor((new Date(myHeld.reserved_until).getTime() - Date.now()) / 1000));
+        if (myHelds.length > 0) {
+          setHeldSeats(myHelds);
+          // Calculate earliest remaining hold duration
+          const minExpiry = Math.min(
+            ...myHelds
+              .filter((s) => s.reserved_until)
+              .map((s) => new Date(s.reserved_until!).getTime())
+          );
+          if (minExpiry && minExpiry > Date.now()) {
+            const diff = Math.max(0, Math.floor((minExpiry - Date.now()) / 1000));
             setSecondsRemaining(diff);
           }
+        } else {
+          setHeldSeats([]);
         }
       }
     } catch (err: any) {
@@ -65,12 +98,12 @@ export const SeatMap: React.FC<SeatMapProps> = ({
     return () => clearInterval(interval);
   }, [event.event_id, user?.user_id]);
 
-  // Countdown timer for 5-minute seat hold
+  // Countdown timer for seat hold
   useEffect(() => {
     if (secondsRemaining <= 0) {
-      if (heldSeat) {
-        setHeldSeat(null);
-        setSelectedSeat(null);
+      if (heldSeats.length > 0) {
+        setHeldSeats([]);
+        setSelectedSeats([]);
       }
       return;
     }
@@ -78,38 +111,58 @@ export const SeatMap: React.FC<SeatMapProps> = ({
       setSecondsRemaining((prev) => Math.max(0, prev - 1));
     }, 1000);
     return () => clearInterval(timer);
-  }, [secondsRemaining, heldSeat]);
+  }, [secondsRemaining, heldSeats.length]);
 
-  const handleHoldSeat = async (seat: Seat) => {
-    if (!admissionToken) {
+  const toggleSelectSeat = (seat: Seat) => {
+    setError(null);
+    const isAlreadySelected = selectedSeats.some((s) => s.seat_id === seat.seat_id);
+
+    if (isAlreadySelected) {
+      setSelectedSeats((prev) => prev.filter((s) => s.seat_id !== seat.seat_id));
+    } else {
+      if (selectedSeats.length >= 4) {
+        setError('Maximum 4 seats per customer allowed.');
+        return;
+      }
+      setSelectedSeats((prev) => [...prev, seat]);
+    }
+  };
+
+  const handleHoldSelectedSeats = async () => {
+    const tokenToUse = activeAdmissionToken || api.getStoredAdmissionToken(event.event_id);
+    if (!tokenToUse) {
       setError('Queue admission token required. Please enter through the virtual waiting room.');
       return;
     }
+    if (selectedSeats.length === 0) return;
+
     setError(null);
     setHolding(true);
     try {
-      const res = await api.holdSeat(event.event_id, seat.seat_id, admissionToken);
-      setHeldSeat(seat);
+      const seatIds = selectedSeats.map((s) => s.seat_id);
+      const res = await api.holdSeats(event.event_id, seatIds, tokenToUse);
+      setHeldSeats(selectedSeats);
+      setSelectedSeats([]);
       setSecondsRemaining(res.hold_duration_seconds || 300);
       await fetchSeats();
     } catch (err: any) {
-      setError(err.message || 'Seat could not be locked. It may have just been claimed by another user.');
+      setError(err.message || 'Seat could not be locked. It may have just been claimed by another customer.');
       await fetchSeats();
     } finally {
       setHolding(false);
     }
   };
 
-  const handleReleaseSeat = async () => {
-    if (!heldSeat) return;
+  const handleReleaseSeats = async () => {
+    if (heldSeats.length === 0) return;
     try {
-      await api.releaseSeat(event.event_id, heldSeat.seat_id);
-      setHeldSeat(null);
-      setSelectedSeat(null);
+      await api.releaseSeat(event.event_id);
+      setHeldSeats([]);
+      setSelectedSeats([]);
       setSecondsRemaining(0);
       await fetchSeats();
     } catch (err: any) {
-      setError(err.message || 'Failed to release seat');
+      setError(err.message || 'Failed to release seats');
     }
   };
 
@@ -126,6 +179,9 @@ export const SeatMap: React.FC<SeatMapProps> = ({
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  const totalHeldPrice = heldSeats.reduce((sum, s) => sum + s.price_cents, 0);
+  const totalSelectedPrice = selectedSeats.reduce((sum, s) => sum + s.price_cents, 0);
+
   return (
     <div className="max-w-6xl mx-auto py-6 px-4 animate-fade-in">
       {/* Top Banner */}
@@ -136,8 +192,13 @@ export const SeatMap: React.FC<SeatMapProps> = ({
             <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-brand-500/20 text-brand-300 border border-brand-500/30">
               Interactive Arena Map
             </span>
+            {activeAdmissionToken && (
+              <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                Pass Verified ✓
+              </span>
+            )}
           </div>
-          <p className="text-xs text-slate-400 mt-1 font-mono">{event.venue}</p>
+          <p className="text-xs text-slate-400 mt-1 font-mono">{event.venue} • Limit: 4 seats/customer</p>
         </div>
 
         {/* Legend */}
@@ -145,6 +206,10 @@ export const SeatMap: React.FC<SeatMapProps> = ({
           <div className="flex items-center space-x-1.5">
             <span className="w-3 h-3 rounded-md bg-emerald-500/20 border border-emerald-500"></span>
             <span className="text-slate-300">Available</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <span className="w-3 h-3 rounded-md bg-brand-500 border border-brand-400"></span>
+            <span className="text-slate-300">Selected</span>
           </div>
           <div className="flex items-center space-x-1.5">
             <span className="w-3 h-3 rounded-md bg-amber-500/30 border border-amber-500"></span>
@@ -156,6 +221,24 @@ export const SeatMap: React.FC<SeatMapProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Missing Admission Pass Banner */}
+      {!activeAdmissionToken && (
+        <div className="mb-6 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row items-center justify-between gap-3 text-amber-300 text-xs">
+          <div className="flex items-center space-x-2">
+            <Users className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Virtual Waiting Room Admission Required: You must pass through the waiting room to unlock flash-sale seat reservations.</span>
+          </div>
+          {onBackToQueue && (
+            <button
+              onClick={onBackToQueue}
+              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition whitespace-nowrap"
+            >
+              Enter Waiting Room
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Error alert */}
       {error && (
@@ -173,8 +256,8 @@ export const SeatMap: React.FC<SeatMapProps> = ({
         </div>
       )}
 
-      {/* Held Seat Countdown Banner */}
-      {heldSeat && (
+      {/* Held Seats Countdown Banner */}
+      {heldSeats.length > 0 && (
         <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-brand-500/20 border border-amber-500/40 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-lg shadow-amber-500/10">
           <div className="flex items-center space-x-3 text-center sm:text-left">
             <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold">
@@ -182,9 +265,11 @@ export const SeatMap: React.FC<SeatMapProps> = ({
             </div>
             <div>
               <div className="text-sm font-bold text-white flex items-center space-x-2">
-                <span>Atomic Hold Secured: Section {heldSeat.section}, Row {heldSeat.row_number}, Seat {heldSeat.seat_number}</span>
+                <span>
+                  {heldSeats.length} Seat(s) Locked: {heldSeats.map((s) => `${s.section}-R${s.row_number}-S${s.seat_number}`).join(', ')}
+                </span>
                 <span className="px-2 py-0.5 rounded text-[11px] bg-amber-500/30 text-amber-300 font-mono">
-                  ${(heldSeat.price_cents / 100).toFixed(0)}
+                  ${(totalHeldPrice / 100).toFixed(2)}
                 </span>
               </div>
               <p className="text-xs text-amber-200/80">
@@ -195,17 +280,17 @@ export const SeatMap: React.FC<SeatMapProps> = ({
 
           <div className="flex items-center space-x-2 w-full sm:w-auto">
             <button
-              onClick={handleReleaseSeat}
+              onClick={handleReleaseSeats}
               className="px-3 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-900 text-slate-300 text-xs font-semibold border border-slate-700 transition flex items-center space-x-1"
             >
               <Unlock className="w-3.5 h-3.5" />
-              <span>Release</span>
+              <span>Release Holds</span>
             </button>
             <button
-              onClick={() => onProceedToCheckout(heldSeat)}
+              onClick={() => onProceedToCheckout(heldSeats)}
               className="flex-1 sm:flex-initial px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-500/20 transition flex items-center justify-center space-x-1.5"
             >
-              <span>Confirm & Pay</span>
+              <span>Confirm & Pay ({heldSeats.length})</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
@@ -243,7 +328,7 @@ export const SeatMap: React.FC<SeatMapProps> = ({
                       const isBooked = seat.status === 'BOOKED';
                       const isHeldByMe = seat.status === 'RESERVED' && user && seat.reserved_by === user.user_id;
                       const isHeldByOther = seat.status === 'RESERVED' && (!user || seat.reserved_by !== user.user_id);
-                      const isSelected = selectedSeat?.seat_id === seat.seat_id;
+                      const isSelected = selectedSeats.some((s) => s.seat_id === seat.seat_id);
 
                       let seatClasses = 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/30 hover:border-emerald-400';
                       if (isBooked) {
@@ -260,7 +345,7 @@ export const SeatMap: React.FC<SeatMapProps> = ({
                         <button
                           key={seat.seat_id}
                           disabled={isBooked || isHeldByOther}
-                          onClick={() => setSelectedSeat(seat)}
+                          onClick={() => toggleSelectSeat(seat)}
                           title={`${seat.section} • Row ${seat.row_number} Seat ${seat.seat_number} • $${(seat.price_cents / 100).toFixed(0)} • Status: ${seat.status}`}
                           className={`w-9 h-9 rounded-xl border text-xs font-mono font-semibold transition-all flex items-center justify-center relative ${seatClasses}`}
                         >
@@ -270,6 +355,8 @@ export const SeatMap: React.FC<SeatMapProps> = ({
                             <Lock className="w-3.5 h-3.5" />
                           ) : isHeldByMe ? (
                             <Check className="w-4 h-4 text-amber-300" />
+                          ) : isSelected ? (
+                            <Check className="w-4 h-4 text-white" />
                           ) : (
                             <span>{seat.seat_number}</span>
                           )}
@@ -284,34 +371,34 @@ export const SeatMap: React.FC<SeatMapProps> = ({
         )}
       </div>
 
-      {/* Selected Seat Action Bar (when not yet held) */}
-      {selectedSeat && !heldSeat && (
+      {/* Selected Seats Floating Bar */}
+      {selectedSeats.length > 0 && heldSeats.length === 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 max-w-lg w-full px-4 animate-fade-in">
           <div className="glass-card rounded-2xl p-4 border border-brand-500/40 shadow-2xl flex items-center justify-between gap-4">
             <div>
-              <div className="text-xs text-slate-400 font-mono">SELECTED SEAT</div>
-              <div className="text-sm font-bold text-white">
-                {selectedSeat.section} • Row {selectedSeat.row_number}, Seat {selectedSeat.seat_number}
+              <div className="text-xs text-slate-400 font-mono">SELECTED SEATS ({selectedSeats.length} / 4)</div>
+              <div className="text-sm font-bold text-white truncate max-w-[220px]">
+                {selectedSeats.map((s) => `${s.section}-${s.seat_number}`).join(', ')}
               </div>
               <div className="text-xs font-mono text-emerald-400 font-bold">
-                ${(selectedSeat.price_cents / 100).toFixed(0)} USD
+                ${(totalSelectedPrice / 100).toFixed(2)} USD
               </div>
             </div>
 
             <button
-              disabled={holding}
-              onClick={() => handleHoldSeat(selectedSeat)}
+              disabled={holding || !activeAdmissionToken}
+              onClick={handleHoldSelectedSeats}
               className="py-2.5 px-5 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:opacity-95 text-white font-bold text-xs shadow-lg shadow-brand-600/30 transition flex items-center space-x-1.5 disabled:opacity-50"
             >
               {holding ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Locking...</span>
+                  <span>Locking {selectedSeats.length} Seats...</span>
                 </>
               ) : (
                 <>
                   <Lock className="w-3.5 h-3.5" />
-                  <span>Hold for 5 Mins</span>
+                  <span>Hold {selectedSeats.length} Seat(s) (5 Mins)</span>
                 </>
               )}
             </button>

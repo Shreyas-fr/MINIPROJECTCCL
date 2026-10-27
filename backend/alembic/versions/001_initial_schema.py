@@ -53,7 +53,7 @@ def upgrade() -> None:
         sa.Column('seat_id', sa.String(length=36), nullable=False),
         sa.Column('event_id', sa.String(length=36), nullable=False),
         sa.Column('section', sa.String(length=50), nullable=False),
-        sa.Column('row_number', sa.String(length=20), nullable=False),
+        sa.Column('row_number', sa.String(length=20), nullable=False, quote=True),
         sa.Column('seat_number', sa.String(length=20), nullable=False),
         sa.Column('price_cents', sa.Integer(), nullable=False),
         sa.Column('status', sa.Enum('AVAILABLE', 'RESERVED', 'BOOKED', name='seat_status_enum'), server_default='AVAILABLE', nullable=True),

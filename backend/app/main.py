@@ -1,9 +1,11 @@
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
+from app.services.queue_scheduler import QueueAdmissionScheduler
 from app.api.v1.health import router as health_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.events import router as events_router
@@ -13,12 +15,25 @@ from app.api.v1.seats import router as seats_router
 from app.api.v1.bookings import router as bookings_router
 from app.api.v1.tickets import router as tickets_router
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Start automatic queue admission scheduler if enabled
+    if settings.ENABLE_QUEUE_SCHEDULER:
+        QueueAdmissionScheduler.start(settings.QUEUE_ADMISSION_INTERVAL_SECONDS)
+    yield
+    # Shutdown: Stop scheduler cleanly
+    if settings.ENABLE_QUEUE_SCHEDULER:
+        await QueueAdmissionScheduler.stop()
+
+
 app = FastAPI(
     title="SurgeGate API",
     description="High-concurrency flash-sale ticket booking and traffic management system",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS
@@ -40,6 +55,7 @@ def root_health():
         "environment": settings.ENVIRONMENT,
         "sqs_queue": settings.SURGEGATE_SQS_URL or "surgegate-ticket-queue (mock/local)",
         "db_configured": bool(settings.get_database_url()),
+        "queue_scheduler_running": QueueAdmissionScheduler.is_running(),
         "message": "SurgeGate traffic management node is operational."
     }
 

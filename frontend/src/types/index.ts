@@ -65,6 +65,16 @@ export interface Booking {
   ticket_id?: string | null;
   ticket_s3_url?: string | null;
   created_at?: string;
+  updated_at?: string;
+  event_name?: string;
+  venue?: string;
+  event_timestamp?: string;
+  seat_info?: string;
+  section?: string;
+  row_number?: string;
+  seat_number?: string;
+  booking_ids?: string[];
+  bookings?: Booking[];
 }
 
 export interface PaymentResult {
@@ -74,6 +84,7 @@ export interface PaymentResult {
   amount_cents: number;
   status: string;
   message: string;
+  booking_ids?: string[];
 }
 
 export interface TicketVerification {

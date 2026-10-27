@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,7 @@ def hold_seat(
         user=current_user,
         event_id=request.event_id,
         seat_id=request.seat_id,
+        seat_ids=request.seat_ids,
         admission_token=request.admission_token
     )
 
@@ -28,7 +30,7 @@ def hold_seat(
 @router.post("/release")
 def release_seat(
     event_id: str = Query(...),
-    seat_id: str = Query(...),
+    seat_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

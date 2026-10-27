@@ -20,7 +20,7 @@ function MainApp() {
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [selectedEvent, setSelectedEvent] = useState<EventDetail | null>(null);
   const [admissionToken, setAdmissionToken] = useState<string | null>(null);
-  const [checkoutSeat, setCheckoutSeat] = useState<Seat | null>(null);
+  const [checkoutSeats, setCheckoutSeats] = useState<Seat[] | null>(null);
   const [viewingTicketBooking, setViewingTicketBooking] = useState<Booking | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [scannerCode, setScannerCode] = useState('');
@@ -48,8 +48,25 @@ function MainApp() {
       .catch(() => setNodeHealth('ONLINE'));
   }, []);
 
+  // Synchronize admission token when selectedEvent changes
+  useEffect(() => {
+    if (selectedEvent) {
+      const stored = api.getStoredAdmissionToken(selectedEvent.event_id);
+      if (stored) {
+        setAdmissionToken(stored);
+      }
+    }
+  }, [selectedEvent?.event_id]);
+
   const handleSelectEvent = (event: EventDetail) => {
     setSelectedEvent(event);
+    const stored = api.getStoredAdmissionToken(event.event_id);
+    if (stored) {
+      setAdmissionToken(stored);
+    } else {
+      setAdmissionToken(null);
+    }
+
     if (!isAuthenticated) {
       setIsAuthModalOpen(true);
       return;
@@ -59,15 +76,18 @@ function MainApp() {
 
   const handleQueueAdmitted = (token: string) => {
     setAdmissionToken(token);
+    if (selectedEvent) {
+      api.setStoredAdmissionToken(selectedEvent.event_id, token);
+    }
     setActiveTab('seats');
   };
 
-  const handleProceedToCheckout = (seat: Seat) => {
-    setCheckoutSeat(seat);
+  const handleProceedToCheckout = (seats: Seat[]) => {
+    setCheckoutSeats(seats);
   };
 
   const handleCheckoutSuccess = (booking: Booking) => {
-    setCheckoutSeat(null);
+    setCheckoutSeats(null);
     setViewingTicketBooking(booking);
     fetchEvents();
   };
@@ -77,6 +97,9 @@ function MainApp() {
     setViewingTicketBooking(null);
     setActiveTab('verify');
   };
+
+  const currentEvent = selectedEvent || (events.length > 0 ? events[0] : null);
+  const currentToken = admissionToken || (currentEvent ? api.getStoredAdmissionToken(currentEvent.event_id) : null);
 
   return (
     <div className="min-h-screen bg-surface-950 flex flex-col font-sans selection:bg-brand-500 selection:text-white">
@@ -98,18 +121,18 @@ function MainApp() {
           />
         )}
 
-        {activeTab === 'queue' && selectedEvent && (
+        {activeTab === 'queue' && currentEvent && (
           <WaitingRoomView
-            event={selectedEvent}
+            event={currentEvent}
             onAdmitted={handleQueueAdmitted}
             onExit={() => setActiveTab('events')}
           />
         )}
 
-        {activeTab === 'seats' && selectedEvent && (
+        {activeTab === 'seats' && currentEvent && (
           <SeatMap
-            event={selectedEvent}
-            admissionToken={admissionToken}
+            event={currentEvent}
+            admissionToken={currentToken}
             onProceedToCheckout={handleProceedToCheckout}
             onBackToQueue={() => setActiveTab('queue')}
           />
@@ -118,6 +141,8 @@ function MainApp() {
         {activeTab === 'bookings' && (
           <MyBookingsView
             onViewTicket={(b) => setViewingTicketBooking(b)}
+            onNavigateToScanner={handleNavigateToScanner}
+            onBrowseEvents={() => setActiveTab('events')}
           />
         )}
 
@@ -136,14 +161,14 @@ function MainApp() {
         )}
       </main>
 
-      {/* Checkout Modal */}
-      {checkoutSeat && selectedEvent && admissionToken && (
+      {/* Checkout Modal (Single or Multi-Seat) */}
+      {checkoutSeats && checkoutSeats.length > 0 && currentEvent && (
         <CheckoutModal
-          isOpen={!!checkoutSeat}
-          event={selectedEvent}
-          seat={checkoutSeat}
-          admissionToken={admissionToken}
-          onClose={() => setCheckoutSeat(null)}
+          isOpen={checkoutSeats.length > 0}
+          event={currentEvent}
+          seats={checkoutSeats}
+          admissionToken={currentToken}
+          onClose={() => setCheckoutSeats(null)}
           onSuccess={handleCheckoutSuccess}
         />
       )}

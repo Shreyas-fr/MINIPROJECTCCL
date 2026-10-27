@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Download, QrCode, CheckCircle2, Printer } from 'lucide-react';
+import { X, Download, QrCode, CheckCircle2, Printer, Layers } from 'lucide-react';
 import { Booking } from '../types';
 import { api } from '../services/api';
 
@@ -18,12 +18,19 @@ export const TicketModal: React.FC<TicketModalProps> = ({
 }) => {
   const [svgContent, setSvgContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [activeBookingIndex, setActiveBookingIndex] = useState(0);
+
+  const allBookings = booking?.bookings && booking.bookings.length > 0 
+    ? booking.bookings 
+    : (booking ? [booking] : []);
+
+  const activeBooking = allBookings[activeBookingIndex] || booking;
 
   useEffect(() => {
-    if (!booking) return;
+    if (!activeBooking) return;
 
     setLoading(true);
-    fetch(api.getTicketSvgUrl(booking.booking_ref))
+    fetch(api.getTicketSvgUrl(activeBooking.booking_ref))
       .then((res) => res.text())
       .then((svg) => {
         setSvgContent(svg);
@@ -32,9 +39,9 @@ export const TicketModal: React.FC<TicketModalProps> = ({
       .catch(() => {
         setLoading(false);
       });
-  }, [booking]);
+  }, [activeBooking?.booking_ref]);
 
-  if (!isOpen || !booking) return null;
+  if (!isOpen || !booking || !activeBooking) return null;
 
   const handleDownload = () => {
     if (!svgContent) return;
@@ -42,7 +49,7 @@ export const TicketModal: React.FC<TicketModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `SurgeGate-Ticket-${booking.booking_ref}.svg`;
+    a.download = `SurgeGate-Ticket-${activeBooking.booking_ref}.svg`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -70,8 +77,39 @@ export const TicketModal: React.FC<TicketModalProps> = ({
           </div>
           <h3 className="text-2xl font-extrabold text-white">Booking Confirmed!</h3>
           <p className="text-xs text-slate-400 mt-1 font-mono">
-            Booking Ref: <strong className="text-brand-300 font-bold">{booking.booking_ref}</strong>
+            {allBookings.length > 1 ? (
+              <span>Order contains <strong className="text-emerald-400">{allBookings.length} confirmed tickets</strong></span>
+            ) : (
+              <span>Booking Ref: <strong className="text-brand-300 font-bold">{activeBooking.booking_ref}</strong></span>
+            )}
           </p>
+        </div>
+
+        {/* Multi-Ticket Switcher (when user booked multiple seats) */}
+        {allBookings.length > 1 && (
+          <div className="mb-4 flex items-center justify-center space-x-2 overflow-x-auto pb-1">
+            <div className="inline-flex p-1 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono">
+              {allBookings.map((b, idx) => (
+                <button
+                  key={b.booking_id}
+                  onClick={() => setActiveBookingIndex(idx)}
+                  className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 ${
+                    activeBookingIndex === idx
+                      ? 'bg-brand-600 text-white font-bold shadow'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Ticket {idx + 1} ({b.seat_info ? b.seat_info.split('•')[0] : `Seat ${idx + 1}`})</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Ticket Metadata Snippet */}
+        <div className="text-center text-xs font-mono text-slate-400 mb-2">
+          Pass <span className="text-white font-bold">{activeBookingIndex + 1} of {allBookings.length}</span> • Ref: <span className="text-brand-300 font-bold">{activeBooking.booking_ref}</span>
         </div>
 
         {/* SVG Ticket Render */}
@@ -110,7 +148,7 @@ export const TicketModal: React.FC<TicketModalProps> = ({
 
           {onNavigateToScanner && (
             <button
-              onClick={() => onNavigateToScanner(booking.booking_ref)}
+              onClick={() => onNavigateToScanner(activeBooking.booking_ref)}
               className="py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-brand-300 font-semibold text-xs border border-brand-500/30 transition flex items-center justify-center space-x-1.5"
             >
               <QrCode className="w-4 h-4" />

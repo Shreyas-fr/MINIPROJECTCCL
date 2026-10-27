@@ -28,6 +28,8 @@ class QueueService:
                 detail=f"Waiting room is only active for ACTIVE flash-sale events (current status: {event.status})"
             )
 
+        heartbeat_cutoff = now - timedelta(seconds=settings.QUEUE_HEARTBEAT_TIMEOUT_SECONDS)
+
         # Check existing queue entry for this user and event
         entry = db.query(QueueEntry).filter(
             QueueEntry.event_id == event_id,
@@ -35,19 +37,36 @@ class QueueService:
         ).order_by(QueueEntry.joined_at.desc()).first()
 
         if entry:
-            # If already admitted and not expired
-            if entry.status == "ADMITTED" and entry.admission_expires_at and entry.admission_expires_at > now:
-                entry.last_heartbeat = now
-                db.commit()
-                return cls.get_queue_status(db, user, event_id)
+            # If already admitted and not expired, refresh heartbeat and return
+            if entry.status == "ADMITTED":
+                if entry.admission_expires_at and entry.admission_expires_at > now:
+                    entry.last_heartbeat = now
+                    db.commit()
+                    return cls.get_queue_status(db, user, event_id)
+                else:
+                    entry.status = "EXPIRED"
+                    entry.admission_token = None
+                    db.commit()
 
-            # If waiting and heartbeat is relatively fresh, just return status
-            if entry.status == "WAITING":
-                entry.last_heartbeat = now
-                db.commit()
-                return cls.get_queue_status(db, user, event_id)
+            # If waiting and heartbeat is fresh, refresh heartbeat and return
+            elif entry.status == "WAITING":
+                if entry.last_heartbeat >= heartbeat_cutoff:
+                    entry.last_heartbeat = now
+                    db.commit()
+                    return cls.get_queue_status(db, user, event_id)
+                else:
+                    entry.status = "EXPIRED"
+                    db.commit()
 
-        # Acquire next queue number atomically for this event
+        # Prevent duplicate active entries: mark any other active entries as EXPIRED
+        db.query(QueueEntry).filter(
+            QueueEntry.event_id == event_id,
+            QueueEntry.user_id == user.user_id,
+            QueueEntry.status.in_(["WAITING", "ADMITTED"])
+        ).update({"status": "EXPIRED", "admission_token": None}, synchronize_session=False)
+        db.commit()
+
+        # Acquire next queue number atomically for this event (FIFO placed at end of line)
         max_num = db.query(func.coalesce(func.max(QueueEntry.queue_number), 0)).filter(
             QueueEntry.event_id == event_id
         ).scalar() or 0
@@ -87,6 +106,7 @@ class QueueService:
         # Check if admitted token has expired
         if entry.status == "ADMITTED" and entry.admission_expires_at and entry.admission_expires_at <= now:
             entry.status = "EXPIRED"
+            entry.admission_token = None
             db.commit()
 
         # Update heartbeat
@@ -165,15 +185,35 @@ class QueueService:
 
     @classmethod
     def leave_queue(cls, db: Session, user: User, event_id: str) -> Dict[str, Any]:
-        entry = db.query(QueueEntry).filter(
+        """
+        Explicitly cancels active queue entries and invalidates any admission token.
+        Also releases any held seats by this user for this event.
+        """
+        db.query(QueueEntry).filter(
             QueueEntry.event_id == event_id,
             QueueEntry.user_id == user.user_id,
             QueueEntry.status.in_(["WAITING", "ADMITTED"])
-        ).first()
-        if entry:
-            entry.status = "LEFT"
-            db.commit()
-        return {"status": "SUCCESS", "message": "Left waiting room"}
+        ).update({
+            "status": "LEFT",
+            "admission_token": None,
+            "admission_expires_at": None
+        }, synchronize_session=False)
+
+        # Release any active seat holds by this user for this event
+        from app.models import Seat
+        db.query(Seat).filter(
+            Seat.event_id == event_id,
+            Seat.reserved_by == user.user_id,
+            Seat.status == "RESERVED"
+        ).update({
+            "status": "AVAILABLE",
+            "reserved_by": None,
+            "reserved_until": None,
+            "version": Seat.version + 1
+        }, synchronize_session=False)
+
+        db.commit()
+        return {"status": "SUCCESS", "message": "Left waiting room and invalidated active passes"}
 
     @classmethod
     def admit_next_batch(cls, db: Session, event_id: str, batch_size: Optional[int] = None) -> int:
@@ -184,12 +224,22 @@ class QueueService:
         size = batch_size or settings.QUEUE_ADMISSION_BATCH_SIZE
         heartbeat_cutoff = now - timedelta(seconds=settings.QUEUE_HEARTBEAT_TIMEOUT_SECONDS)
 
+        # Production queue control: check event exists, is ACTIVE, and has available capacity
+        event = db.query(Event).filter(Event.event_id == event_id).first()
+        if not event or event.status != "ACTIVE" or event.available_capacity <= 0:
+            return 0
+
+        # Cap batch size by available event capacity
+        size = min(size, event.available_capacity)
+        if size <= 0:
+            return 0
+
         # 1. Clean up expired admissions
         db.query(QueueEntry).filter(
             QueueEntry.event_id == event_id,
             QueueEntry.status == "ADMITTED",
             QueueEntry.admission_expires_at <= now
-        ).update({"status": "EXPIRED"}, synchronize_session=False)
+        ).update({"status": "EXPIRED", "admission_token": None}, synchronize_session=False)
 
         # 2. Select next waiting users with active heartbeat
         candidates = db.query(QueueEntry).filter(
@@ -212,7 +262,13 @@ class QueueService:
         return admitted_count
 
     @classmethod
-    def validate_admission_token(cls, db: Session, user: User, event_id: str, token: str) -> QueueEntry:
+    def validate_admission_token(cls, db: Session, user: User, event_id: str, token: Optional[str]) -> QueueEntry:
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Queue admission token required. Please enter through the virtual waiting room."
+            )
+
         now = cls._now()
         entry = db.query(QueueEntry).filter(
             QueueEntry.event_id == event_id,
@@ -224,11 +280,12 @@ class QueueService:
         if not entry:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid or unrecognized queue admission token. Please join the waiting room."
+                detail="Queue admission token required. Please enter through the virtual waiting room."
             )
 
         if entry.admission_expires_at and entry.admission_expires_at <= now:
             entry.status = "EXPIRED"
+            entry.admission_token = None
             db.commit()
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
