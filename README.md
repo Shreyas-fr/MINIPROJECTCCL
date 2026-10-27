@@ -401,3 +401,135 @@ To avoid ongoing AWS charges after testing, run the cleanup script:
 ### 4. S3 Bucket Name Already Taken
 - **Cause:** S3 bucket names are globally unique across all AWS accounts.
 - **Solution:** The script automatically appends your AWS Account ID and region suffix. If you manually specify `S3_BUCKET_NAME` in `config.env`, ensure it is unique.
+
+---
+
+## 10. Application Quickstart & Local Demonstration Guide
+
+SurgeGate includes a complete React frontend and FastAPI backend designed to run locally on Docker Compose or natively on Windows (PowerShell) and macOS/Linux.
+
+### System Access Points
+
+| Service | Local URL | Description |
+|---|---|---|
+| **React Frontend** | `http://localhost:5173` | Interactive customer portal & admin operations dashboard |
+| **FastAPI Backend** | `http://localhost:8000` | High-concurrency REST API & Health checks |
+| **Interactive OpenAPI Docs** | `http://localhost:8000/docs` | Swagger UI documentation with direct execution |
+| **MySQL 8 Database** | `localhost:3306` | Transactional database with row locks & FIFO queue |
+
+### Default Seed Accounts
+
+| Account Type | Email | Password | Role |
+|---|---|---|---|
+| **System Administrator** | `admin@surgegate.internal` | `AdminPass123!` | `ADMIN` (Queue Controls, Telemetry) |
+| **Customer User 1** | `student@example.edu` | `StudentPass123!` | `CUSTOMER` (Waiting Room & Booking) |
+| **Customer User 2** | `attendee@surgegate.internal` | `AttendeePass123!` | `CUSTOMER` (Waiting Room & Booking) |
+
+---
+
+### Option A: Running with Docker Compose (Recommended)
+
+Make sure Docker Desktop is running, then execute from the project root:
+
+```bash
+# 1. Start all services (MySQL 8, Backend, Frontend)
+docker compose up --build -d
+
+# 2. View logs
+docker compose logs -f
+
+# 3. Stop services
+docker compose down
+```
+
+---
+
+### Option B: Windows PowerShell Setup & Native Execution
+
+Follow these exact commands in **Windows PowerShell (Run as Administrator or standard terminal)**:
+
+#### 1. Setup Backend (PowerShell)
+```powershell
+# Navigate to project backend
+cd backend
+
+# Create Python virtual environment
+python -m venv .venv
+
+# Activate virtual environment
+.\.venv\Scripts\Activate.ps1
+
+# Upgrade pip and install all dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Run database migrations and seed realistic events/users
+python -m app.seed
+
+# Start FastAPI backend server
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+#### 2. Setup Frontend (New PowerShell Terminal)
+```powershell
+# Navigate to frontend directory
+cd frontend
+
+# Install Node dependencies
+npm install
+
+# Start Vite dev server with proxy
+npm run dev
+```
+Open **`http://localhost:5173`** in your browser.
+
+---
+
+### 11. Running Automated Tests & Load Simulations
+
+#### 1. Run Complete Automated Pytest Suite
+```bash
+# Windows PowerShell
+$env:PYTHONPATH=".\backend"
+.\backend\.venv\Scripts\pytest backend\tests -v
+
+# macOS / Linux
+PYTHONPATH=./backend ./backend/.venv/bin/pytest backend/tests -v
+```
+
+#### 2. Run High-Concurrency Anti-Overselling Race Test
+```bash
+# Windows PowerShell
+$env:PYTHONPATH=".\backend"
+.\backend\.venv\Scripts\pytest backend\tests\test_race_conditions.py -v
+
+# macOS / Linux
+PYTHONPATH=./backend ./backend/.venv/bin/pytest backend/tests/test_race_conditions.py -v
+```
+
+#### 3. Run Headless Locust Load Test (Traffic Surge Simulation)
+```bash
+# Windows PowerShell
+$env:PYTHONPATH=".\backend"
+.\backend\.venv\Scripts\locust -f load_testing\locustfile.py --headless -u 20 -r 5 --run-time 30s --host http://localhost:8000
+
+# macOS / Linux
+PYTHONPATH=./backend ./backend/.venv/bin/locust -f load_testing/locustfile.py --headless -u 20 -r 5 --run-time 30s --host http://localhost:8000
+```
+
+---
+
+## 12. Remaining AWS Cloud Deployment Tasks (Team Handoff)
+
+The application layer is fully tested and verified. The other team member responsible for AWS deployment can follow these remaining steps:
+
+1. Copy `config.env.example` to `config.env` and set `AWS_REGION` and `DB_PASSWORD`.
+2. Run `./deploy.sh` to provision the VPC, RDS MySQL, SQS queue, Lambda function, S3 bucket, and ALB.
+3. Verify cloud infrastructure health using `./verify.sh`.
+4. Run schema initialization against the provisioned RDS instance:
+   ```bash
+   source deployment-outputs.env
+   mysql -h "$SURGEGATE_DB_HOST" -u "$SURGEGATE_DB_USER" -p "$SURGEGATE_DB_NAME" < schema/schema.sql
+   ```
+5. Deploy application code to the EC2 Auto Scaling instances by setting `USE_AWS_MOCK=false`.
+6. Run `./cleanup.sh` when demonstration is finished to destroy all resources and avoid unwanted cloud charges.

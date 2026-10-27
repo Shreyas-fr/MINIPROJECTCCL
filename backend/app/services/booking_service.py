@@ -65,12 +65,27 @@ class BookingService:
                     detail="Seat is currently reserved by another customer. Please select another seat."
                 )
 
-        # 3. Reserve seat for 5 minutes
+        # 3. Reserve seat for 5 minutes atomically with engine-level concurrency safety
         reserved_until = now + timedelta(seconds=hold_duration)
-        seat.status = "RESERVED"
-        seat.reserved_by = user.user_id
-        seat.reserved_until = reserved_until
-        seat.version += 1
+
+        updated_rows = db.query(Seat).filter(
+            Seat.seat_id == seat_id,
+            Seat.event_id == event_id,
+            (Seat.status == "AVAILABLE") | 
+            ((Seat.status == "RESERVED") & ((Seat.reserved_until <= now) | (Seat.reserved_by == user.user_id)))
+        ).update({
+            Seat.status: "RESERVED",
+            Seat.reserved_by: user.user_id,
+            Seat.reserved_until: reserved_until,
+            Seat.version: Seat.version + 1
+        }, synchronize_session="fetch")
+
+        if updated_rows == 0:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Seat is currently reserved by another customer. Please select another seat."
+            )
 
         db.commit()
         db.refresh(seat)
