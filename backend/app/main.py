@@ -5,6 +5,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.api.v1.health import router as health_router
+from app.api.v1.auth import router as auth_router
+from app.api.v1.events import router as events_router
 
 app = FastAPI(
     title="SurgeGate API",
@@ -38,6 +40,8 @@ def root_health():
 
 # Register V1 API routers
 app.include_router(health_router, prefix=settings.API_V1_PREFIX, tags=["Health"])
+app.include_router(auth_router, prefix=f"{settings.API_V1_PREFIX}/auth", tags=["Auth"])
+app.include_router(events_router, prefix=f"{settings.API_V1_PREFIX}/events", tags=["Events"])
 
 # Ensure local storage directory exists for mock/local ticket assets
 os.makedirs(settings.LOCAL_STORAGE_DIR, exist_ok=True)
